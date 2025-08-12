@@ -1,0 +1,21 @@
+services:
+  facade-service:
+    build: ./facade-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      - logging-service
+      - counter-service
+    environment:
+      LOGGING_URL: "http://logging-service:8000"
+      COUNTER_URL: "http://counter-service:8000"
+
+  logging-service:
+    build: ./logging-service
+    expose:
+      - "8000"
+
+  counter-service:
+    build: ./counter-service
+    expose:
+      - "8000"
