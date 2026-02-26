@@ -1,0 +1,20 @@
+hazelcast:
+  cluster-name: dev
+  map:
+    lab-map:
+      backup-count: 1
+      async-backup-count: 0
+    counter-map:
+      backup-count: 1
+      async-backup-count: 0
+
+    counter-map-lock:
+      backup-count: 1
+      async-backup-count: 0
+
+    counter-map-opt:
+      backup-count: 1
+      async-backup-count: 0
+  queue:
+    lab-queue:
+      max-size: 10

@@ -1,0 +1,52 @@
+services:
+  hz1:
+    image: hazelcast/hazelcast:5.3
+    container_name: hz1
+    ports:
+      - "5701:5701"
+    environment:
+      HAZELCAST_CONFIG: /opt/hazelcast/config/hazelcast.yaml
+    volumes:
+      - ./hazelcast.yaml:/opt/hazelcast/config/hazelcast.yaml
+    networks:
+      - hznet
+
+  hz2:
+    image: hazelcast/hazelcast:5.3
+    container_name: hz2
+    environment:
+      HAZELCAST_CONFIG: /opt/hazelcast/config/hazelcast.yaml
+    volumes:
+      - ./hazelcast.yaml:/opt/hazelcast/config/hazelcast.yaml
+    networks:
+      - hznet
+    depends_on:
+      - hz1
+
+  hz3:
+    image: hazelcast/hazelcast:5.3
+    container_name: hz3
+    environment:
+      HAZELCAST_CONFIG: /opt/hazelcast/config/hazelcast.yaml
+    volumes:
+      - ./hazelcast.yaml:/opt/hazelcast/config/hazelcast.yaml
+    networks:
+      - hznet
+    depends_on:
+      - hz1
+
+  mc:
+    image: hazelcast/management-center:5.3
+    container_name: hazelcast-mc
+    ports:
+      - "8080:8080"
+    networks:
+      - hznet
+    depends_on:
+      - hz1
+      - hz2
+      - hz3
+
+networks:
+  hznet:
+    driver: bridge
