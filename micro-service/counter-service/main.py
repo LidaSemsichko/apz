@@ -1,60 +1,131 @@
-import asyncio
-from typing import Any, Dict
+import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from sqlalchemy import Column, Float, String, create_engine, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, declarative_base
 
-app = FastAPI(title="counter-service")
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@postgres:5432/appdb",
+)
 
-_balances: Dict[str, float] = {}
-_applied: Dict[str, bool] = {}
-_lock = asyncio.Lock()
+engine = create_engine(DATABASE_URL, future=True)
+Base = declarative_base()
 
-class InternalTransaction(BaseModel):
-    transaction_id: str = Field(..., min_length=1)
-    timestamp: float
-    user_Id: str = Field(..., min_length=1)
+
+class Account(Base):
+    __tablename__ = "accounts"
+
+    user_id = Column(String, primary_key=True)
+    balance = Column(Float, nullable=False, default=0.0)
+
+
+class AppliedTransaction(Base):
+    __tablename__ = "applied_transactions"
+
+    transaction_id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+
+
+class TransactionIn(BaseModel):
+    transaction_id: str
+    user_id: str
     amount: float
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health():
+    return {"status": "ok", "service": "counter-service"}
+
 
 @app.post("/apply")
-async def apply_transaction(tx: InternalTransaction) -> Dict[str, Any]:
-    async with _lock:
-        # idempotency: if already applied, do nothing
-        if _applied.get(tx.transaction_id):
-            bal = float(_balances.get(tx.user_Id, 0.0))
-            return {"user_Id": tx.user_Id, "balance": bal, "dedup": True}
+def apply_transaction(tx: TransactionIn):
+    with Session(engine) as session:
+        existing = session.get(AppliedTransaction, tx.transaction_id)
+        if existing is not None:
+            account = session.get(Account, tx.user_id)
+            balance = account.balance if account else 0.0
+            return {
+                "status": "duplicate",
+                "transaction_id": tx.transaction_id,
+                "balance": balance,
+            }
 
-        cur = float(_balances.get(tx.user_Id, 0.0))
-        new_bal = cur + float(tx.amount)
-        _balances[tx.user_Id] = new_bal
-        _applied[tx.transaction_id] = True
-        return {"user_Id": tx.user_Id, "balance": new_bal, "dedup": False}
+        account = session.execute(
+            select(Account)
+            .where(Account.user_id == tx.user_id)
+            .with_for_update()
+        ).scalar_one_or_none()
 
-@app.get("/balance/{user_Id}")
-async def get_balance(user_Id: str) -> Dict[str, Any]:
-    if not user_Id:
-        raise HTTPException(status_code=400, detail="user_Id required")
-    async with _lock:
-        bal = float(_balances.get(user_Id, 0.0))
-    return {"user_Id": user_Id, "balance": bal}
+        if account is None:
+            account = Account(user_id=tx.user_id, balance=0.0)
+            session.add(account)
+            session.flush()
 
-@app.get("/balances")
-async def get_balances() -> Dict[str, Dict[str, float]]:
-    async with _lock:
-        return {"balances": dict(_balances)}
+        account.balance += tx.amount
+        session.add(
+            AppliedTransaction(
+                transaction_id=tx.transaction_id,
+                user_id=tx.user_id,
+                amount=tx.amount,
+            )
+        )
+        session.commit()
+
+        return {
+            "status": "applied",
+            "transaction_id": tx.transaction_id,
+            "balance": account.balance,
+        }
+
+
+@app.get("/account/{user_id}")
+def get_account(user_id: str):
+    with Session(engine) as session:
+        account = session.get(Account, user_id)
+        txs = session.execute(
+            select(AppliedTransaction).where(AppliedTransaction.user_id == user_id)
+        ).scalars().all()
+
+        return {
+            "user_id": user_id,
+            "balance": account.balance if account else 0.0,
+            "transactions": [
+                {
+                    "transaction_id": tx.transaction_id,
+                    "amount": tx.amount,
+                }
+                for tx in txs
+            ],
+        }
+
+
+@app.get("/accounts")
+def get_accounts():
+    with Session(engine) as session:
+        rows = session.execute(select(Account)).scalars().all()
+        return {
+            "balances": {row.user_id: row.balance for row in rows}
+        }
 
 
 @app.post("/reset")
-async def reset_state() -> Dict[str, str]:
-    async with _lock:
-        _balances.clear()
-        # якщо ти додавала _applied для ідемпотентності:
-        try:
-            _applied.clear()
-        except NameError:
-            pass
-    return {"status": "reset"}
+def reset_system():
+    with Session(engine) as session:
+        session.query(AppliedTransaction).delete()
+        session.query(Account).delete()
+        session.commit()
+    return {"status": "reset_all"}

@@ -1,50 +1,78 @@
-import asyncio
-from typing import Any, Dict, List
+import os
+import time
+from contextlib import asynccontextmanager
 
+import hazelcast
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-app = FastAPI(title="logging-service")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "logging-service")
+HAZELCAST_MEMBERS = os.getenv(
+    "HAZELCAST_MEMBERS",
+    "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701",
+).split(",")
+HAZELCAST_MAP_NAME = os.getenv("HAZELCAST_MAP_NAME", "logs")
 
-# In-memory storage: transaction_id -> message
-_storage: Dict[str, Dict[str, Any]] = {}
-_lock = asyncio.Lock()
+hz_client = None
+hz_map = None
 
-class InternalTransaction(BaseModel):
-    transaction_id: str = Field(..., min_length=1)
-    timestamp: float
-    user_Id: str = Field(..., min_length=1)
+
+class LogMessage(BaseModel):
+    transaction_id: str
+    user_id: str
     amount: float
+    timestamp: float | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global hz_client, hz_map
+    hz_client = hazelcast.HazelcastClient(cluster_members=HAZELCAST_MEMBERS)
+    hz_map = hz_client.get_map(HAZELCAST_MAP_NAME).blocking()
+    print(f"[{SERVICE_NAME}] Connected to Hazelcast: {HAZELCAST_MEMBERS}")
+    yield
+    hz_client.shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health():
+    return {"status": "ok", "service": SERVICE_NAME}
+
 
 @app.post("/log")
-async def log_transaction(tx: InternalTransaction) -> Dict[str, str]:
-    async with _lock:
-        _storage[tx.transaction_id] = tx.model_dump()
-    # optional debug print:
-    # print("LOG:", tx.model_dump())
-    return {"status": "stored"}
+def write_log(msg: LogMessage):
+    if msg.timestamp is None:
+        msg.timestamp = time.time()
 
-@app.get("/logs")
-async def get_all_logs() -> Dict[str, List[Dict[str, Any]]]:
-    async with _lock:
-        return {"transactions": list(_storage.values())}
+    existing = hz_map.get(msg.transaction_id)
+    if existing is not None:
+        print(f"[{SERVICE_NAME}] Duplicate log ignored: {msg.transaction_id}")
+        return {
+            "status": "duplicate",
+            "service": SERVICE_NAME,
+            "transaction_id": msg.transaction_id,
+        }
 
-@app.get("/logs/user/{user_Id}")
-async def get_user_logs(user_Id: str) -> Dict[str, List[Dict[str, Any]]]:
-    if not user_Id:
-        raise HTTPException(status_code=400, detail="user_Id required")
-    async with _lock:
-        txs = [v for v in _storage.values() if v.get("user_Id") == user_Id]
-    return {"transactions": txs}
+    payload = msg.model_dump()
+    hz_map.set(msg.transaction_id, payload)
+    print(
+        f"[{SERVICE_NAME}] Stored tx={msg.transaction_id} "
+        f"user={msg.user_id} amount={msg.amount}"
+    )
+
+    return {
+        "status": "stored",
+        "service": SERVICE_NAME,
+        "transaction_id": msg.transaction_id,
+    }
 
 
-
-@app.post("/reset")
-async def reset_state() -> Dict[str, str]:
-    async with _lock:
-        _storage.clear()
-    return {"status": "reset"}
+@app.get("/log/{transaction_id}")
+def read_log(transaction_id: str):
+    value = hz_map.get(transaction_id)
+    if value is None:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return value

@@ -1,21 +1,111 @@
 services:
-  facade-service:
-    build: ./facade-service
-    ports:
-      - "8000:8000"
-    depends_on:
-      - logging-service
-      - counter-service
+  postgres:
+    image: postgres:15
+    container_name: postgres
     environment:
-      LOGGING_URL: "http://logging-service:8000"
-      COUNTER_URL: "http://counter-service:8000"
+      POSTGRES_DB: appdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
-  logging-service:
+  hazelcast-1:
+    image: hazelcast/hazelcast:5.3.6
+    container_name: hazelcast-1
+    ports:
+      - "5701:5701"
+
+  hazelcast-2:
+    image: hazelcast/hazelcast:5.3.6
+    container_name: hazelcast-2
+    ports:
+      - "5702:5701"
+
+  hazelcast-3:
+    image: hazelcast/hazelcast:5.3.6
+    container_name: hazelcast-3
+    ports:
+      - "5703:5701"
+
+  logging-service-1:
     build: ./logging-service
+    container_name: logging-service-1
     expose:
       - "8000"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    restart: on-failure
+    environment:
+      SERVICE_NAME: "logging-service-1"
+      HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+      HAZELCAST_MAP_NAME: "logs"
+
+  logging-service-2:
+    build: ./logging-service
+    container_name: logging-service-2
+    expose:
+      - "8000"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    restart: on-failure
+    environment:
+      SERVICE_NAME: "logging-service-2"
+      HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+      HAZELCAST_MAP_NAME: "logs"
+
+  logging-service-3:
+    build: ./logging-service
+    container_name: logging-service-3
+    expose:
+      - "8000"
+    depends_on:
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+    restart: on-failure
+    environment:
+      SERVICE_NAME: "logging-service-3"
+      HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+      HAZELCAST_MAP_NAME: "logs"
 
   counter-service:
     build: ./counter-service
+    container_name: counter-service
     expose:
       - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://postgres:postgres@postgres:5432/appdb"
+
+  facade-service:
+    build: ./facade-service
+    container_name: facade-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      - logging-service-1
+      - logging-service-2
+      - logging-service-3
+      - counter-service
+    restart: on-failure
+    environment:
+      LOGGING_URLS: "http://logging-service-1:8000,http://logging-service-2:8000,http://logging-service-3:8000"
+      COUNTER_URL: "http://counter-service:8000"
+
+volumes:
+  postgres_data:
