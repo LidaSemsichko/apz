@@ -6,7 +6,6 @@ def main():
     client = hazelcast.HazelcastClient(cluster_members=["hz1:5701"])
     q = client.get_queue(QUEUE_NAME).blocking()
 
-    # �������� �� ���� �������
     cleared = 0
     while True:
         item = q.poll()
@@ -19,7 +18,6 @@ def main():
     inserted = 0
     failed = 0
 
-    # offer � timeout=0: ���� ����� ���������  ������ False
     for i in range(1, 101):
         ok = q.offer(i, 0)
         if ok:
