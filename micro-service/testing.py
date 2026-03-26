@@ -18,7 +18,7 @@ async def post_one_with_retry(client: httpx.AsyncClient, user_id: str, amount: i
                 json={"user_Id": user_id, "amount": amount, "transaction_id": txid},
             )
 
-            # якщо facade віддав 5xx — повторюємо той самий txid
+        
             if r.status_code >= 500:
                 await asyncio.sleep(0.01)
                 continue
@@ -30,7 +30,7 @@ async def post_one_with_retry(client: httpx.AsyncClient, user_id: str, amount: i
             await asyncio.sleep(0.01)
 
 
-import uuid  # додай у верхні імпорти
+import uuid  
 
 async def worker(client_id: int, user_id: str, n: int, amount: int) -> None:
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
@@ -65,7 +65,6 @@ def rps(total_requests: int, total_s: float) -> float:
     return total_requests / total_s if total_s > 0 else 0.0
 
 def assert_exact(value: float, expected: float, label: str) -> None:
-    # floats тут мають бути цілими, але на всяк випадок робимо строгість через невелику похибку
     eps = 1e-9
     if abs(value - expected) > eps:
         raise AssertionError(f"{label}: expected EXACT {expected}, got {value}")
@@ -88,7 +87,6 @@ async def scenario_1_distinct_users() -> None:
 
     balances = await get_accounts()
 
-    # STRICT checks: must be exactly 10000 for each of 10 users
     for u in users:
         got = balances.get(u, 0.0)
         assert_exact(got, float(REQS_PER_CLIENT), f"Balance for {u}")
@@ -132,7 +130,6 @@ async def main() -> None:
         r = await client.get(f"{FACADE}/health")
         r.raise_for_status()
 
-    # Run both scenarios
     # await scenario_1_distinct_users()
     await scenario_2_same_user()
 
