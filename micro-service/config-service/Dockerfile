@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install fastapi uvicorn hazelcast-python-client httpx pydantic
+RUN pip install fastapi uvicorn
 
 COPY main.py /app/main.py
 

@@ -1,4 +1,11 @@
 services:
+  config-service:
+    build: ./config-service
+    container_name: config-service
+    ports:
+      - "8500:8000"
+    restart: on-failure
+
   postgres:
     image: postgres:15
     container_name: postgres
@@ -41,12 +48,15 @@ services:
     expose:
       - "8000"
     depends_on:
+      - config-service
       - hazelcast-1
       - hazelcast-2
       - hazelcast-3
     restart: on-failure
     environment:
       SERVICE_NAME: "logging-service-1"
+      SERVICE_URL: "http://logging-service-1:8000"
+      CONFIG_SERVER_URL: "http://config-service:8000"
       HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
       HAZELCAST_MAP_NAME: "logs"
 
@@ -56,12 +66,15 @@ services:
     expose:
       - "8000"
     depends_on:
+      - config-service
       - hazelcast-1
       - hazelcast-2
       - hazelcast-3
     restart: on-failure
     environment:
       SERVICE_NAME: "logging-service-2"
+      SERVICE_URL: "http://logging-service-2:8000"
+      CONFIG_SERVER_URL: "http://config-service:8000"
       HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
       HAZELCAST_MAP_NAME: "logs"
 
@@ -71,12 +84,15 @@ services:
     expose:
       - "8000"
     depends_on:
+      - config-service
       - hazelcast-1
       - hazelcast-2
       - hazelcast-3
     restart: on-failure
     environment:
       SERVICE_NAME: "logging-service-3"
+      SERVICE_URL: "http://logging-service-3:8000"
+      CONFIG_SERVER_URL: "http://config-service:8000"
       HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
       HAZELCAST_MAP_NAME: "logs"
 
@@ -86,11 +102,19 @@ services:
     expose:
       - "8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      - config-service
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
+      - postgres
     restart: on-failure
     environment:
+      SERVICE_NAME: "counter-service"
+      SERVICE_URL: "http://counter-service:8000"
+      CONFIG_SERVER_URL: "http://config-service:8000"
       DATABASE_URL: "postgresql+psycopg2://postgres:postgres@postgres:5432/appdb"
+      HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+      QUEUE_NAME: "transaction-queue"
 
   facade-service:
     build: ./facade-service
@@ -98,14 +122,21 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      - config-service
       - logging-service-1
       - logging-service-2
       - logging-service-3
       - counter-service
+      - hazelcast-1
+      - hazelcast-2
+      - hazelcast-3
     restart: on-failure
     environment:
-      LOGGING_URLS: "http://logging-service-1:8000,http://logging-service-2:8000,http://logging-service-3:8000"
-      COUNTER_URL: "http://counter-service:8000"
+      SERVICE_NAME: "facade-service"
+      SERVICE_URL: "http://facade-service:8000"
+      CONFIG_SERVER_URL: "http://config-service:8000"
+      HAZELCAST_MEMBERS: "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701"
+      QUEUE_NAME: "transaction-queue"
 
 volumes:
   postgres_data:

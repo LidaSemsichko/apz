@@ -1,10 +1,13 @@
+import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+import hazelcast
+import httpx
+from fastapi import FastAPI
 from pydantic import BaseModel
 from sqlalchemy import Column, Float, String, create_engine, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base
 
 DATABASE_URL = os.getenv(
@@ -12,8 +15,23 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg2://postgres:postgres@postgres:5432/appdb",
 )
 
+SERVICE_NAME = os.getenv("SERVICE_NAME", "counter-service")
+SERVICE_URL = os.getenv("SERVICE_URL", "http://counter-service:8000")
+CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-service:8000")
+
+HAZELCAST_MEMBERS = os.getenv(
+    "HAZELCAST_MEMBERS",
+    "hazelcast-1:5701,hazelcast-2:5701,hazelcast-3:5701",
+).split(",")
+
+QUEUE_NAME = os.getenv("QUEUE_NAME", "transaction-queue")
+
 engine = create_engine(DATABASE_URL, future=True)
 Base = declarative_base()
+
+hz_client = None
+hz_queue = None
+consumer_task = None
 
 
 class Account(Base):
@@ -37,27 +55,27 @@ class TransactionIn(BaseModel):
     amount: float
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
+async def register_on_config_server():
+    payload = {
+        "service_name": "counter-service",
+        "service_url": SERVICE_URL,
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(f"{CONFIG_SERVER_URL}/register", json=payload)
+        resp.raise_for_status()
+        print(f"[{SERVICE_NAME}] Registered on config-server: {payload}")
 
 
-app = FastAPI(lifespan=lifespan)
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "counter-service"}
-
-
-@app.post("/apply")
-def apply_transaction(tx: TransactionIn):
+def apply_transaction_logic(tx: TransactionIn):
     with Session(engine) as session:
         existing = session.get(AppliedTransaction, tx.transaction_id)
         if existing is not None:
             account = session.get(Account, tx.user_id)
             balance = account.balance if account else 0.0
+
+            print(f"[{SERVICE_NAME}] Duplicate tx ignored: {tx.transaction_id}")
+
             return {
                 "status": "duplicate",
                 "transaction_id": tx.transaction_id,
@@ -76,6 +94,7 @@ def apply_transaction(tx: TransactionIn):
             session.flush()
 
         account.balance += tx.amount
+
         session.add(
             AppliedTransaction(
                 transaction_id=tx.transaction_id,
@@ -83,13 +102,78 @@ def apply_transaction(tx: TransactionIn):
                 amount=tx.amount,
             )
         )
+
         session.commit()
+
+        print(
+            f"[{SERVICE_NAME}] Applied tx={tx.transaction_id} "
+            f"user={tx.user_id} amount={tx.amount} new_balance={account.balance}"
+        )
 
         return {
             "status": "applied",
             "transaction_id": tx.transaction_id,
             "balance": account.balance,
         }
+
+
+async def consume_queue():
+    print(f"[{SERVICE_NAME}] Consumer started for queue: {QUEUE_NAME}")
+
+    while True:
+        try:
+            item = await asyncio.to_thread(hz_queue.take)
+
+            if isinstance(item, str):
+                data = json.loads(item)
+            else:
+                data = item
+
+            tx = TransactionIn(**data)
+
+            print(f"[{SERVICE_NAME}] Received from queue: {data}")
+            apply_transaction_logic(tx)
+
+        except Exception as e:
+            print(f"[{SERVICE_NAME}] Consumer error: {e}")
+            await asyncio.sleep(1)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global hz_client, hz_queue, consumer_task
+
+    Base.metadata.create_all(bind=engine)
+
+    hz_client = hazelcast.HazelcastClient(cluster_members=HAZELCAST_MEMBERS)
+    hz_queue = hz_client.get_queue(QUEUE_NAME).blocking()
+
+    print(f"[{SERVICE_NAME}] Connected to Hazelcast: {HAZELCAST_MEMBERS}")
+    print(f"[{SERVICE_NAME}] Connected to queue: {QUEUE_NAME}")
+
+    await register_on_config_server()
+
+    consumer_task = asyncio.create_task(consume_queue())
+
+    yield
+
+    if consumer_task:
+        consumer_task.cancel()
+
+    hz_client.shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "counter-service"}
+
+
+@app.post("/apply")
+def apply_transaction(tx: TransactionIn):
+    return apply_transaction_logic(tx)
 
 
 @app.get("/account/{user_id}")
@@ -128,4 +212,5 @@ def reset_system():
         session.query(AppliedTransaction).delete()
         session.query(Account).delete()
         session.commit()
+
     return {"status": "reset_all"}
