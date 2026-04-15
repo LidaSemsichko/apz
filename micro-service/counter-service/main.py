@@ -4,7 +4,6 @@ import os
 from contextlib import asynccontextmanager
 
 import hazelcast
-import httpx
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sqlalchemy import Column, Float, String, create_engine, select
@@ -16,8 +15,6 @@ DATABASE_URL = os.getenv(
 )
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "counter-service")
-SERVICE_URL = os.getenv("SERVICE_URL", "http://counter-service:8000")
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-service:8000")
 
 HAZELCAST_MEMBERS = os.getenv(
     "HAZELCAST_MEMBERS",
@@ -53,18 +50,6 @@ class TransactionIn(BaseModel):
     transaction_id: str
     user_id: str
     amount: float
-
-
-async def register_on_config_server():
-    payload = {
-        "service_name": "counter-service",
-        "service_url": SERVICE_URL,
-    }
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(f"{CONFIG_SERVER_URL}/register", json=payload)
-        resp.raise_for_status()
-        print(f"[{SERVICE_NAME}] Registered on config-server: {payload}")
 
 
 def apply_transaction_logic(tx: TransactionIn):
@@ -151,8 +136,6 @@ async def lifespan(app: FastAPI):
     print(f"[{SERVICE_NAME}] Connected to Hazelcast: {HAZELCAST_MEMBERS}")
     print(f"[{SERVICE_NAME}] Connected to queue: {QUEUE_NAME}")
 
-    await register_on_config_server()
-
     consumer_task = asyncio.create_task(consume_queue())
 
     yield
@@ -168,7 +151,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "counter-service"}
+    return {"status": "ok", "service": SERVICE_NAME}
 
 
 @app.post("/apply")

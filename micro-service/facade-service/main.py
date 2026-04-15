@@ -1,6 +1,6 @@
+import asyncio
 import json
 import os
-import random
 import time
 from contextlib import asynccontextmanager
 
@@ -10,8 +10,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "facade-service")
-SERVICE_URL = os.getenv("SERVICE_URL", "http://facade-service:8000")
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-service:8000")
+
+LOGGING_URL = os.getenv("LOGGING_URL", "http://logging-service:8000")
+COUNTER_URL = os.getenv("COUNTER_URL", "http://counter-service:8000")
 
 HAZELCAST_MEMBERS = os.getenv(
     "HAZELCAST_MEMBERS",
@@ -44,77 +45,34 @@ def update_metric(name: str, elapsed_s: float):
     metrics[name]["avg_ms"] = metrics[name]["total_s"] / metrics[name]["calls"] * 1000
 
 
-async def register_on_config_server():
-    payload = {
-        "service_name": "facade-service",
-        "service_url": SERVICE_URL,
-    }
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(f"{CONFIG_SERVER_URL}/register", json=payload)
-        resp.raise_for_status()
-        print(f"[{SERVICE_NAME}] Registered on config-server: {payload}")
-
-
-async def get_service_instances(service_name: str) -> list[str]:
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(f"{CONFIG_SERVER_URL}/services/{service_name}")
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("instances", [])
-
-
-async def choose_service_instance(service_name: str) -> str:
-    instances = await get_service_instances(service_name)
-
-    if not instances:
-        raise HTTPException(
-            status_code=503,
-            detail=f"No instances available for {service_name}",
-        )
-
-    return random.choice(instances)
-
-
 async def call_logging(payload: dict):
-    instances = await get_service_instances("logging-service")
-    if not instances:
-        raise HTTPException(status_code=503, detail="No logging-service instances")
-
-    shuffled = instances[:]
-    random.shuffle(shuffled)
-
     last_error = None
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        for base_url in shuffled:
+        for _ in range(3):
             try:
                 start = time.perf_counter()
-                resp = await client.post(f"{base_url}/log", json=payload)
+                resp = await client.post(f"{LOGGING_URL}/log", json=payload)
                 elapsed = time.perf_counter() - start
                 update_metric("logging", elapsed)
 
                 resp.raise_for_status()
-                print(
-                    f"[{SERVICE_NAME}] Logged tx={payload['transaction_id']} via {base_url}"
-                )
                 return resp.json()
 
             except Exception as e:
                 last_error = e
-                print(f"[{SERVICE_NAME}] logging-service failed: {base_url} -> {e}")
-                continue
+                await asyncio.sleep(0.2)
 
     raise HTTPException(
         status_code=503,
-        detail=f"All logging-service instances failed: {last_error}",
+        detail=f"logging-service unavailable: {last_error}",
     )
 
 
 async def enqueue_transaction(payload: dict):
     try:
         start = time.perf_counter()
-        await asyncio_to_thread_put(json.dumps(payload))
+        await asyncio.to_thread(hz_queue.put, json.dumps(payload))
         elapsed = time.perf_counter() - start
         update_metric("queue", elapsed)
         print(f"[{SERVICE_NAME}] Queued tx={payload['transaction_id']}")
@@ -122,26 +80,14 @@ async def enqueue_transaction(payload: dict):
         raise HTTPException(status_code=503, detail=f"Queue unavailable: {e}")
 
 
-async def asyncio_to_thread_put(item: str):
-    import asyncio
-    await asyncio.to_thread(hz_queue.put, item)
-
-
 async def call_counter_get(path: str):
-    instances = await get_service_instances("counter-service")
-    if not instances:
-        raise HTTPException(status_code=503, detail="No counter-service instances")
-
-    shuffled = instances[:]
-    random.shuffle(shuffled)
-
     last_error = None
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        for base_url in shuffled:
+        for _ in range(3):
             try:
                 start = time.perf_counter()
-                resp = await client.get(f"{base_url}{path}")
+                resp = await client.get(f"{COUNTER_URL}{path}")
                 elapsed = time.perf_counter() - start
                 update_metric("counter_get", elapsed)
 
@@ -150,12 +96,11 @@ async def call_counter_get(path: str):
 
             except Exception as e:
                 last_error = e
-                print(f"[{SERVICE_NAME}] counter-service failed: {base_url} -> {e}")
-                continue
+                await asyncio.sleep(0.2)
 
     raise HTTPException(
         status_code=503,
-        detail=f"All counter-service instances failed: {last_error}",
+        detail=f"counter-service unavailable: {last_error}",
     )
 
 
@@ -168,8 +113,8 @@ async def lifespan(app: FastAPI):
 
     print(f"[{SERVICE_NAME}] Connected to Hazelcast: {HAZELCAST_MEMBERS}")
     print(f"[{SERVICE_NAME}] Connected to queue: {QUEUE_NAME}")
-
-    await register_on_config_server()
+    print(f"[{SERVICE_NAME}] LOGGING_URL={LOGGING_URL}")
+    print(f"[{SERVICE_NAME}] COUNTER_URL={COUNTER_URL}")
 
     yield
 
@@ -181,7 +126,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "facade-service"}
+    return {"status": "ok", "service": SERVICE_NAME}
 
 
 @app.post("/metrics/reset")
@@ -199,16 +144,13 @@ def get_metrics():
 
 @app.post("/system/reset")
 async def reset_system():
-    instances = await get_service_instances("counter-service")
-    if not instances:
-        raise HTTPException(status_code=503, detail="No counter-service instances")
-
-    base_url = random.choice(instances)
-
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(f"{base_url}/reset")
+        resp = await client.post(f"{COUNTER_URL}/reset")
         resp.raise_for_status()
-        return {"status": "reset_all"}
+
+    await asyncio.to_thread(hz_queue.clear)
+
+    return {"status": "reset_all"}
 
 
 @app.post("/transaction")

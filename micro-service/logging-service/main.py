@@ -1,14 +1,12 @@
 import os
 import time
 from contextlib import asynccontextmanager
+
 import hazelcast
-import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "logging-service")
-SERVICE_URL = os.getenv("SERVICE_URL", "http://logging-service:8000")
-CONFIG_SERVER_URL = os.getenv("CONFIG_SERVER_URL", "http://config-service:8000")
 
 HAZELCAST_MEMBERS = os.getenv(
     "HAZELCAST_MEMBERS",
@@ -28,18 +26,6 @@ class LogMessage(BaseModel):
     timestamp: float | None = None
 
 
-async def register_on_config_server():
-    payload = {
-        "service_name": "logging-service",
-        "service_url": SERVICE_URL,
-    }
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(f"{CONFIG_SERVER_URL}/register", json=payload)
-        resp.raise_for_status()
-        print(f"[{SERVICE_NAME}] Registered on config-server: {payload}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global hz_client, hz_map
@@ -48,8 +34,7 @@ async def lifespan(app: FastAPI):
     hz_map = hz_client.get_map(HAZELCAST_MAP_NAME).blocking()
 
     print(f"[{SERVICE_NAME}] Connected to Hazelcast: {HAZELCAST_MEMBERS}")
-
-    await register_on_config_server()
+    print(f"[{SERVICE_NAME}] Using map: {HAZELCAST_MAP_NAME}")
 
     yield
 

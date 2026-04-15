@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: micro-config
+data:
+  HAZELCAST_MEMBERS: "hazelcast:5701"
+  HAZELCAST_MAP_NAME: "logs"
+  QUEUE_NAME: "transaction-queue"
+  LOGGING_URL: "http://logging-service:8000"
+  COUNTER_URL: "http://counter-service:8000"
+  DATABASE_URL: "postgresql+psycopg2://postgres:postgres@postgres:5432/appdb"
